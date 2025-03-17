@@ -1,0 +1,47 @@
+/* styles/lobby.css */
+
+body {
+    margin: 0;
+    font-family: sans-serif;
+  }
+  
+  .container {
+    min-height: 100vh;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    background-color: #1f2937; /* Tailwind gray-900 */
+    color: #fff;
+  }
+  
+  h1 {
+    font-size: 2.25rem; /* Approximate text-4xl */
+    font-weight: bold;
+    margin-bottom: 2rem; /* mb-8 */
+  }
+  
+  .input-field {
+    padding: 0.75rem;       /* p-3 */
+    border: 1px solid #ccc; /* Optional border */
+    border-radius: 0.25rem;  /* rounded */
+    color: #000;            /* text-black */
+    margin-bottom: 1.5rem;   /* mb-6 */
+    width: 16rem;           /* w-64 */
+    text-align: center;     /* text-center */
+  }
+  
+  .join-button {
+    padding: 0.75rem 2rem;      /* py-3 px-8 */
+    background-color: #16a34a;  /* Tailwind green-600 */
+    border: none;
+    border-radius: 0.25rem;     /* rounded */
+    color: #fff;
+    cursor: pointer;
+    transition: background-color 0.2s ease-in-out; /* transition-colors */
+  }
+  
+  .join-button:hover {
+    background-color: #15803d; /* Tailwind green-700 */
+  }
+  

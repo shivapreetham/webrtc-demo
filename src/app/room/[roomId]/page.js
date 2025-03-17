@@ -2,6 +2,7 @@
 
 import { useEffect, useRef } from "react";
 import { useRouter } from "next/navigation";
+import "../../styles/room.css"; // Make sure the path is correct
 
 export default function Room({ params }) {
   const { roomId } = params;
@@ -35,7 +36,7 @@ export default function Room({ params }) {
     };
   }, [roomId]);
 
-  // Initialize RTCPeerConnection and local media stream
+  // Initialize PeerConnection and local media stream
   useEffect(() => {
     if (!socketRef.current) return;
 
@@ -44,7 +45,6 @@ export default function Room({ params }) {
     });
     pcRef.current = pc;
 
-    // ICE candidate handler: send candidates to the signaling server
     pc.onicecandidate = (event) => {
       if (event.candidate) {
         socketRef.current.send(
@@ -57,12 +57,10 @@ export default function Room({ params }) {
       }
     };
 
-    // Log ICE connection state changes
     pc.oniceconnectionstatechange = () => {
       console.log("ICE Connection State:", pc.iceConnectionState);
     };
 
-    // Remote track handler: assign received stream to remote video element
     pc.ontrack = (event) => {
       console.log("Received remote track:", event.streams[0]);
       if (remoteVideoRef.current && !remoteVideoRef.current.srcObject) {
@@ -76,7 +74,6 @@ export default function Room({ params }) {
       }
     };
 
-    // Get local media and add tracks to the connection
     navigator.mediaDevices
       .getUserMedia({ video: true, audio: true })
       .then((stream) => {
@@ -123,7 +120,6 @@ export default function Room({ params }) {
     }
   };
 
-  // Caller initiates the call by creating and sending an offer
   const startCall = async () => {
     const pc = pcRef.current;
     if (!pc) {
@@ -137,7 +133,6 @@ export default function Room({ params }) {
     );
   };
 
-  // Optional: Resume remote video playback manually (for mobile gestures)
   const resumeRemoteVideo = () => {
     if (remoteVideoRef.current) {
       remoteVideoRef.current
@@ -147,53 +142,33 @@ export default function Room({ params }) {
   };
 
   return (
-    <div className="min-h-screen bg-gradient-to-r from-blue-600 to-purple-600 text-white flex flex-col items-center p-8">
-      <header className="mb-8">
-        <h1 className="text-4xl font-extrabold">Room: {roomId}</h1>
+    <div className="container">
+      <header className="header">
+        <h1>Room: {roomId}</h1>
       </header>
-      <div className="w-full max-w-5xl flex flex-col md:flex-row gap-8 mb-8">
-        <div className="flex-1 bg-white/10 p-4 rounded shadow-lg flex flex-col items-center">
-          <h2 className="text-xl font-semibold mb-2">Your Video</h2>
-          <video
-            ref={localVideoRef}
-            autoPlay
-            playsInline
-            muted
-            className="w-full h-auto rounded"
-          />
+      <div className="video-container">
+        <div className="video-card">
+          <h2>Your Video</h2>
+          <video ref={localVideoRef} autoPlay playsInline muted />
         </div>
-        <div className="flex-1 bg-white/10 p-4 rounded shadow-lg flex flex-col items-center">
-          <h2 className="text-xl font-semibold mb-2">Remote Video</h2>
-          <video
-            ref={remoteVideoRef}
-            autoPlay
-            playsInline
-            className="w-full h-auto rounded"
-          />
+        <div className="video-card">
+          <h2>Remote Video</h2>
+          <video ref={remoteVideoRef} autoPlay playsInline />
         </div>
       </div>
-      <div className="flex flex-col md:flex-row gap-4">
-        <button
-          onClick={startCall}
-          className="px-6 py-3 bg-green-600 hover:bg-green-700 rounded font-semibold"
-        >
+      <div className="button-group">
+        <button onClick={startCall} className="start">
           Start Call (Caller Only)
         </button>
-        <button
-          onClick={resumeRemoteVideo}
-          className="px-6 py-3 bg-blue-600 hover:bg-blue-700 rounded font-semibold"
-        >
+        <button onClick={resumeRemoteVideo} className="resume">
           Resume Remote Video
         </button>
-        <button
-          onClick={() => router.push("/")}
-          className="px-6 py-3 bg-red-600 hover:bg-red-700 rounded font-semibold"
-        >
+        <button onClick={() => router.push("/")} className="leave">
           Leave
         </button>
       </div>
-      <footer className="mt-8 text-sm opacity-75">
-        Note: Using the same device for both peers may trigger camera/mic conflicts.
+      <footer className="footer">
+        Note: Testing on the same device may trigger camera/mic conflicts.
       </footer>
     </div>
   );
