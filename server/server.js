@@ -3,21 +3,18 @@ const express = require("express");
 const { WebSocketServer } = require("ws");
 const cors = require("cors");
 
-const PORT = process.env.PORT || 10000; // Render may set PORT to 10000
+const PORT = process.env.PORT || 10000;
 const app = express();
 
-// Enable CORS for frontend communication
 app.use(cors());
 app.use(express.json());
 
-// Start Express server
 const server = app.listen(PORT, () => {
   console.log(`Server running on http://localhost:${PORT}`);
 });
 
-// Set up WebSocket server on the same HTTP server
 const wss = new WebSocketServer({ server });
-const rooms = {}; // Store clients by room
+const rooms = {};
 
 wss.on("connection", (ws) => {
   ws.on("message", (message) => {
@@ -36,7 +33,7 @@ wss.on("connection", (ws) => {
       case "candidate":
         if (rooms[room]) {
           rooms[room].forEach((client) => {
-            if (client !== ws && client.readyState === WebSocket.OPEN) {
+            if (client !== ws && client.readyState === 1) {
               client.send(JSON.stringify(data));
             }
           });
