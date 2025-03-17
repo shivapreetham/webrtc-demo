@@ -1,34 +1,42 @@
-// WebSocket Signaling Server (server.js)
-
-const WebSocket = require('ws');
+const WebSocket = require("ws");
 const wss = new WebSocket.Server({ port: 8080 });
 
-let clients = {};
+let rooms = {};
 
-wss.on('connection', (ws) => {
-    ws.on('message', (message) => {
-        let data = JSON.parse(message);
-        
-        switch (data.type) {
-            case 'join':
-                clients[data.room] = clients[data.room] || [];
-                clients[data.room].push(ws);
+wss.on("connection", (ws) => {
+    ws.on("message", (message) => {
+        const data = JSON.parse(message);
+        const { type, room } = data;
+
+        switch (type) {
+            case "join":
+                if (!rooms[room]) {
+                    rooms[room] = [];
+                }
+                rooms[room].push(ws);
+                console.log(`User joined room: ${room}`);
                 break;
-            case 'offer':
-            case 'answer':
-            case 'candidate':
-                clients[data.room]?.forEach(client => {
-                    if (client !== ws) {
-                        client.send(JSON.stringify(data));
-                    }
-                });
+
+            case "offer":
+            case "answer":
+            case "candidate":
+                if (rooms[room]) {
+                    rooms[room].forEach((client) => {
+                        if (client !== ws && client.readyState === WebSocket.OPEN) {
+                            client.send(JSON.stringify(data));
+                        }
+                    });
+                }
                 break;
         }
     });
 
-    ws.on('close', () => {
-        for (let room in clients) {
-            clients[room] = clients[room].filter(client => client !== ws);
-        }
+    ws.on("close", () => {
+        Object.keys(rooms).forEach((room) => {
+            rooms[room] = rooms[room].filter((client) => client !== ws);
+            if (rooms[room].length === 0) {
+                delete rooms[room];
+            }
+        });
     });
 });
