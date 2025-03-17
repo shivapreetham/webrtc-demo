@@ -24,74 +24,89 @@ export default function Room({ params }) {
     };
 
     ws.onmessage = (message) => handleMessage(JSON.parse(message.data));
+    ws.onerror = (err) => console.error("Socket error:", err);
 
     return () => {
       ws.close();
     };
   }, [roomId]);
 
-  // Initialize PeerConnection and local media on mount
+  // Initialize PeerConnection and local media once the WebSocket is ready
   useEffect(() => {
-    const initConnection = async () => {
-      // Create the RTCPeerConnection
-      const pc = new RTCPeerConnection({
-        iceServers: [{ urls: "stun:stun.l.google.com:19302" }],
-      });
-      setPeerConnection(pc);
+    if (!socket) return;
 
-      // Set up ICE candidate handler
-      pc.onicecandidate = (event) => {
-        if (event.candidate && socket) {
-          socket.send(
-            JSON.stringify({ type: "candidate", candidate: event.candidate, room: roomId })
-          );
-        }
-      };
+    const pc = new RTCPeerConnection({
+      iceServers: [{ urls: "stun:stun.l.google.com:19302" }],
+    });
+    setPeerConnection(pc);
 
-      // Handle remote stream addition
-      pc.ontrack = (event) => {
-        remoteVideoRef.current.srcObject = event.streams[0];
-      };
-
-      try {
-        // Get local media stream
-        const stream = await navigator.mediaDevices.getUserMedia({ video: true, audio: true });
-        localVideoRef.current.srcObject = stream;
-        // Add tracks to the connection
-        stream.getTracks().forEach((track) => pc.addTrack(track, stream));
-      } catch (error) {
-        console.error("Error accessing media devices.", error);
+    // Send ICE candidates to signaling server
+    pc.onicecandidate = (event) => {
+      if (event.candidate && socket.readyState === WebSocket.OPEN) {
+        socket.send(
+          JSON.stringify({
+            type: "candidate",
+            candidate: event.candidate,
+            room: roomId,
+          })
+        );
       }
     };
 
-    // Only initialize once the WebSocket is ready
-    if (socket) {
-      initConnection();
-    }
+    // When remote stream arrives, show it in the remote video element
+    pc.ontrack = (event) => {
+      if (remoteVideoRef.current) {
+        remoteVideoRef.current.srcObject = event.streams[0];
+      }
+    };
+
+    // Get local media and add tracks to peer connection
+    navigator.mediaDevices
+      .getUserMedia({ video: true, audio: true })
+      .then((stream) => {
+        if (localVideoRef.current) {
+          localVideoRef.current.srcObject = stream;
+        }
+        stream.getTracks().forEach((track) => pc.addTrack(track, stream));
+      })
+      .catch((error) => {
+        console.error("Error accessing media devices:", error);
+      });
+
+    return () => {
+      pc.close();
+    };
   }, [socket, roomId]);
 
-  // Handle incoming WebSocket messages
+  // Handle incoming signaling messages
   const handleMessage = async (message) => {
-    if (!peerConnection) return;
-
+    if (!peerConnection) {
+      console.log("PeerConnection not ready. Message:", message);
+      return;
+    }
+    console.log("Received message:", message);
     if (message.type === "offer") {
-      console.log("Received offer, setting remote description");
       await peerConnection.setRemoteDescription(new RTCSessionDescription(message.offer));
       const answer = await peerConnection.createAnswer();
       await peerConnection.setLocalDescription(answer);
       socket.send(JSON.stringify({ type: "answer", answer, room: roomId }));
     } else if (message.type === "answer") {
-      console.log("Received answer, setting remote description");
       await peerConnection.setRemoteDescription(new RTCSessionDescription(message.answer));
     } else if (message.type === "candidate") {
-      console.log("Received ICE candidate, adding to peer connection");
-      await peerConnection.addIceCandidate(new RTCIceCandidate(message.candidate));
+      try {
+        await peerConnection.addIceCandidate(new RTCIceCandidate(message.candidate));
+      } catch (err) {
+        console.error("Error adding ICE candidate:", err);
+      }
     }
   };
 
-  // Create offer (should be triggered by the caller only)
+  // Start call: Caller triggers offer on the existing connection
   const startCall = async () => {
-    if (!peerConnection) return;
+    if (!peerConnection) {
+      console.error("PeerConnection not initialized yet.");
+      return;
+    }
     const offer = await peerConnection.createOffer();
     await peerConnection.setLocalDescription(offer);
     socket.send(JSON.stringify({ type: "offer", offer, room: roomId }));
@@ -104,7 +119,7 @@ export default function Room({ params }) {
         <video ref={localVideoRef} autoPlay playsInline className="w-1/2 border" />
         <video ref={remoteVideoRef} autoPlay playsInline className="w-1/2 border" />
       </div>
-      {/* Only one user should click this button (the caller) */}
+      {/* Only the caller should click this button */}
       <button onClick={startCall} className="px-4 py-2 mt-4 bg-green-600 rounded">
         Start Call (Caller Only)
       </button>
