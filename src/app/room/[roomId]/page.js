@@ -15,6 +15,7 @@ export default function Room({ params }) {
 
   // Initialize WebSocket connection
   useEffect(() => {
+    // Replace with your deployed signaling server URL
     const ws = new WebSocket("wss://webrtc-demo-tndz.onrender.com");
     setSocket(ws);
 
@@ -23,7 +24,11 @@ export default function Room({ params }) {
       ws.send(JSON.stringify({ type: "join", room: roomId }));
     };
 
-    ws.onmessage = (message) => handleMessage(JSON.parse(message.data));
+    ws.onmessage = (message) => {
+      const data = JSON.parse(message.data);
+      handleMessage(data);
+    };
+
     ws.onerror = (err) => console.error("Socket error:", err);
 
     return () => {
@@ -40,7 +45,7 @@ export default function Room({ params }) {
     });
     setPeerConnection(pc);
 
-    // Send ICE candidates to signaling server
+    // Handle ICE candidates
     pc.onicecandidate = (event) => {
       if (event.candidate && socket.readyState === WebSocket.OPEN) {
         socket.send(
@@ -53,14 +58,14 @@ export default function Room({ params }) {
       }
     };
 
-    // When remote stream arrives, show it in the remote video element
+    // When remote stream arrives, attach it to the remote video element
     pc.ontrack = (event) => {
       if (remoteVideoRef.current) {
         remoteVideoRef.current.srcObject = event.streams[0];
       }
     };
 
-    // Get local media and add tracks to peer connection
+    // Get local media and add tracks to PeerConnection
     navigator.mediaDevices
       .getUserMedia({ video: true, audio: true })
       .then((stream) => {
@@ -86,22 +91,33 @@ export default function Room({ params }) {
     }
     console.log("Received message:", message);
     if (message.type === "offer") {
-      await peerConnection.setRemoteDescription(new RTCSessionDescription(message.offer));
+      // Callee: receive offer, set remote description, and send answer
+      await peerConnection.setRemoteDescription(
+        new RTCSessionDescription(message.offer)
+      );
       const answer = await peerConnection.createAnswer();
       await peerConnection.setLocalDescription(answer);
-      socket.send(JSON.stringify({ type: "answer", answer, room: roomId }));
+      socket.send(
+        JSON.stringify({ type: "answer", answer, room: roomId })
+      );
     } else if (message.type === "answer") {
-      await peerConnection.setRemoteDescription(new RTCSessionDescription(message.answer));
+      // Caller: set remote description on receiving answer
+      await peerConnection.setRemoteDescription(
+        new RTCSessionDescription(message.answer)
+      );
     } else if (message.type === "candidate") {
+      // Add ICE candidate
       try {
-        await peerConnection.addIceCandidate(new RTCIceCandidate(message.candidate));
+        await peerConnection.addIceCandidate(
+          new RTCIceCandidate(message.candidate)
+        );
       } catch (err) {
         console.error("Error adding ICE candidate:", err);
       }
     }
   };
 
-  // Start call: Caller triggers offer on the existing connection
+  // Start call: Only the caller should click this to create and send an offer
   const startCall = async () => {
     if (!peerConnection) {
       console.error("PeerConnection not initialized yet.");
@@ -116,14 +132,30 @@ export default function Room({ params }) {
     <div className="flex flex-col items-center justify-center min-h-screen bg-gray-900 text-white">
       <h1 className="text-2xl font-bold mb-4">Room: {roomId}</h1>
       <div className="flex space-x-4">
-        <video ref={localVideoRef} autoPlay playsInline className="w-1/2 border" />
-        <video ref={remoteVideoRef} autoPlay playsInline className="w-1/2 border" />
+        <video
+          ref={localVideoRef}
+          autoPlay
+          playsInline
+          className="w-1/2 border"
+        />
+        <video
+          ref={remoteVideoRef}
+          autoPlay
+          playsInline
+          className="w-1/2 border"
+        />
       </div>
-      {/* Only the caller should click this button */}
-      <button onClick={startCall} className="px-4 py-2 mt-4 bg-green-600 rounded">
+      {/* Only one user should click "Start Call" (the caller) */}
+      <button
+        onClick={startCall}
+        className="px-4 py-2 mt-4 bg-green-600 rounded"
+      >
         Start Call (Caller Only)
       </button>
-      <button onClick={() => router.push("/")} className="px-4 py-2 mt-4 bg-red-600 rounded">
+      <button
+        onClick={() => router.push("/")}
+        className="px-4 py-2 mt-4 bg-red-600 rounded"
+      >
         Leave
       </button>
     </div>

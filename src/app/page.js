@@ -22,7 +22,10 @@ export default function Home() {
         onChange={(e) => setRoomId(e.target.value)}
         className="p-2 text-black rounded"
       />
-      <button onClick={handleJoin} className="px-4 py-2 mt-4 bg-green-600 rounded">
+      <button
+        onClick={handleJoin}
+        className="px-4 py-2 mt-4 bg-green-600 rounded"
+      >
         Join Room
       </button>
     </div>

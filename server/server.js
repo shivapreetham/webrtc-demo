@@ -1,12 +1,23 @@
-const WebSocket = require("ws");
+require("dotenv").config();
+const express = require("express");
+const { WebSocketServer } = require("ws");
+const cors = require("cors");
 
-// Bind to the PORT environment variable; default to 10000 if not provided
-const PORT = process.env.PORT || 10000;
-const wss = new WebSocket.Server({ port: PORT });
+const PORT = process.env.PORT || 10000; // Render may set PORT to 10000
+const app = express();
 
-console.log(`WebSocket server running on port ${PORT}`);
+// Enable CORS for frontend communication
+app.use(cors());
+app.use(express.json());
 
-let rooms = {};
+// Start Express server
+const server = app.listen(PORT, () => {
+  console.log(`Server running on http://localhost:${PORT}`);
+});
+
+// Set up WebSocket server on the same HTTP server
+const wss = new WebSocketServer({ server });
+const rooms = {}; // Store clients by room
 
 wss.on("connection", (ws) => {
   ws.on("message", (message) => {
@@ -15,9 +26,7 @@ wss.on("connection", (ws) => {
 
     switch (type) {
       case "join":
-        if (!rooms[room]) {
-          rooms[room] = [];
-        }
+        if (!rooms[room]) rooms[room] = [];
         rooms[room].push(ws);
         console.log(`User joined room: ${room}`);
         break;
@@ -39,9 +48,7 @@ wss.on("connection", (ws) => {
   ws.on("close", () => {
     Object.keys(rooms).forEach((room) => {
       rooms[room] = rooms[room].filter((client) => client !== ws);
-      if (rooms[room].length === 0) {
-        delete rooms[room];
-      }
+      if (rooms[room].length === 0) delete rooms[room];
     });
   });
 });
