@@ -1,19 +1,19 @@
-// pages/room/[roomId]/page.js
 "use client";
+
 import { useState, useEffect, useRef } from "react";
 import { useRouter } from "next/navigation";
 
 export default function Room({ params }) {
   const { roomId } = params;
   const router = useRouter();
+
   const localVideoRef = useRef(null);
   const remoteVideoRef = useRef(null);
+
   const socketRef = useRef(null);
   const pcRef = useRef(null);
 
-  // Initialize WebSocket connection
   useEffect(() => {
-    // Replace the URL below with your deployed signaling server URL if needed
     const socket = new WebSocket("wss://webrtc-demo-tndz.onrender.com");
     socketRef.current = socket;
 
@@ -35,7 +35,6 @@ export default function Room({ params }) {
     };
   }, [roomId]);
 
-  // Initialize RTCPeerConnection and local media
   useEffect(() => {
     if (!socketRef.current) return;
 
@@ -44,7 +43,7 @@ export default function Room({ params }) {
     });
     pcRef.current = pc;
 
-    // ICE candidate event
+    // ICE candidate handling
     pc.onicecandidate = (event) => {
       if (event.candidate) {
         socketRef.current.send(
@@ -57,36 +56,48 @@ export default function Room({ params }) {
       }
     };
 
+    // ICE connection state change logging
+    pc.oniceconnectionstatechange = () => {
+      console.log("ICE Connection State:", pc.iceConnectionState);
+    };
+
     // Remote track event
     pc.ontrack = (event) => {
       console.log("Received remote track:", event.streams[0]);
-      if (remoteVideoRef.current && !remoteVideoRef.current.srcObject) {
+      if (remoteVideoRef.current) {
         remoteVideoRef.current.srcObject = event.streams[0];
+        remoteVideoRef.current.play().catch((err) =>
+          console.error("Error playing remote video:", err)
+        );
       }
     };
 
-    // Get local media stream
+    // Get local media and add tracks
     navigator.mediaDevices
       .getUserMedia({ video: true, audio: true })
       .then((stream) => {
         if (localVideoRef.current) {
           localVideoRef.current.srcObject = stream;
+          localVideoRef.current.play().catch((err) =>
+            console.error("Error playing local video:", err)
+          );
         }
-        stream.getTracks().forEach((track) => pc.addTrack(track, stream));
+        stream.getTracks().forEach((track) => {
+          console.log(`Adding local track: ${track.kind}`);
+          pc.addTrack(track, stream);
+        });
       })
-      .catch((error) => {
-        console.error("Error accessing media devices:", error);
-      });
+      .catch((error) => console.error("Error accessing media devices:", error));
 
     return () => {
       pc.close();
     };
   }, [roomId]);
 
-  // Handle incoming socket messages
   const handleSocketMessage = async (data) => {
     const pc = pcRef.current;
     if (!pc) return;
+
     if (data.type === "offer") {
       await pc.setRemoteDescription(new RTCSessionDescription(data.offer));
       const answer = await pc.createAnswer();
@@ -105,7 +116,6 @@ export default function Room({ params }) {
     }
   };
 
-  // Caller initiates the call by creating an offer
   const startCall = async () => {
     const pc = pcRef.current;
     if (!pc) return;
