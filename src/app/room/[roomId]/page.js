@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useEffect, useRef } from "react";
+import { useEffect, useRef } from "react";
 import { useRouter } from "next/navigation";
 
 export default function Room({ params }) {
@@ -9,10 +9,10 @@ export default function Room({ params }) {
 
   const localVideoRef = useRef(null);
   const remoteVideoRef = useRef(null);
-
   const socketRef = useRef(null);
   const pcRef = useRef(null);
 
+  // Initialize WebSocket connection
   useEffect(() => {
     const socket = new WebSocket("wss://webrtc-demo-tndz.onrender.com");
     socketRef.current = socket;
@@ -35,15 +35,15 @@ export default function Room({ params }) {
     };
   }, [roomId]);
 
+  // Initialize PeerConnection and local media stream
   useEffect(() => {
     if (!socketRef.current) return;
-
     const pc = new RTCPeerConnection({
       iceServers: [{ urls: "stun:stun.l.google.com:19302" }],
     });
     pcRef.current = pc;
 
-    // ICE candidate handling
+    // ICE candidate handler: send candidates to signaling server
     pc.onicecandidate = (event) => {
       if (event.candidate) {
         socketRef.current.send(
@@ -56,49 +56,64 @@ export default function Room({ params }) {
       }
     };
 
-    // ICE connection state change logging
+    // Log ICE connection state for debugging
     pc.oniceconnectionstatechange = () => {
       console.log("ICE Connection State:", pc.iceConnectionState);
     };
 
-    // Remote track event
+    // Remote track handler: assign received stream to remote video
     pc.ontrack = (event) => {
       console.log("Received remote track:", event.streams[0]);
       if (remoteVideoRef.current) {
-        remoteVideoRef.current.srcObject = event.streams[0];
-        remoteVideoRef.current.play().catch((err) =>
-          console.error("Error playing remote video:", err)
-        );
+        // Only update if not already set
+        if (!remoteVideoRef.current.srcObject) {
+          remoteVideoRef.current.srcObject = event.streams[0];
+          // Attempt to play and catch errors (e.g., due to interrupted play)
+          remoteVideoRef.current
+            .play()
+            .then(() => console.log("Remote video playback started"))
+            .catch((err) =>
+              console.error("Error playing remote video:", err)
+            );
+        } else {
+          console.log("Remote video already assigned.");
+        }
       }
     };
 
-    // Get local media and add tracks
+    // Get local media stream and add tracks to PeerConnection
     navigator.mediaDevices
       .getUserMedia({ video: true, audio: true })
       .then((stream) => {
         if (localVideoRef.current) {
           localVideoRef.current.srcObject = stream;
-          localVideoRef.current.play().catch((err) =>
-            console.error("Error playing local video:", err)
-          );
+          localVideoRef.current
+            .play()
+            .then(() => console.log("Local video playback started"))
+            .catch((err) =>
+              console.error("Error playing local video:", err)
+            );
         }
         stream.getTracks().forEach((track) => {
-          console.log(`Adding local track: ${track.kind}`);
+          console.log(`Adding local ${track.kind} track`);
           pc.addTrack(track, stream);
         });
       })
-      .catch((error) => console.error("Error accessing media devices:", error));
+      .catch((error) =>
+        console.error("Error accessing media devices:", error)
+      );
 
     return () => {
       pc.close();
     };
   }, [roomId]);
 
+  // Handle signaling messages from the server
   const handleSocketMessage = async (data) => {
     const pc = pcRef.current;
     if (!pc) return;
-
     if (data.type === "offer") {
+      // Callee: set remote description, then create and send answer
       await pc.setRemoteDescription(new RTCSessionDescription(data.offer));
       const answer = await pc.createAnswer();
       await pc.setLocalDescription(answer);
@@ -106,6 +121,7 @@ export default function Room({ params }) {
         JSON.stringify({ type: "answer", answer, room: roomId })
       );
     } else if (data.type === "answer") {
+      // Caller: set remote description when answer arrives
       await pc.setRemoteDescription(new RTCSessionDescription(data.answer));
     } else if (data.type === "candidate") {
       try {
@@ -116,9 +132,13 @@ export default function Room({ params }) {
     }
   };
 
+  // Caller: Initiate the call by creating and sending an offer
   const startCall = async () => {
     const pc = pcRef.current;
-    if (!pc) return;
+    if (!pc) {
+      console.error("PeerConnection not initialized yet.");
+      return;
+    }
     const offer = await pc.createOffer();
     await pc.setLocalDescription(offer);
     socketRef.current.send(
