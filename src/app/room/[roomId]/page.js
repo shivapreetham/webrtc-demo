@@ -2,7 +2,7 @@
 
 import { useEffect, useRef } from "react";
 import { useRouter } from "next/navigation";
-import "../../styles/room.css"; // Make sure the path is correct
+import "../../styles/room.css";
 
 export default function Room({ params }) {
   const { roomId } = params;

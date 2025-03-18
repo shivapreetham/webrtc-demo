@@ -1,8 +1,7 @@
 "use client";
 import { useState } from "react";
 import { useRouter } from "next/navigation";
-import "../styles/lobby.css"; // Ensure this path is correct
-
+import "../app/styles/lobby.css";
 export default function Home() {
   const [roomId, setRoomId] = useState("");
   const router = useRouter();
