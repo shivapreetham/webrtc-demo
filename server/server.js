@@ -143,11 +143,20 @@ wss.on('connection', (ws) => {
           
         case 'join':
           // User joining an existing room
+          console.log(`[SERVER] User ${userId} trying to join room ${data.room}`);
+          console.log(`[SERVER] Active rooms:`, Array.from(activeRooms.keys()));
           const room = activeRooms.get(data.room);
           if (room) {
             console.log(`[SERVER] User ${userId} joined room ${data.room}`);
+            console.log(`[SERVER] Room details:`, {
+              user1: room.user1.id,
+              user2: room.user2.id,
+              user1Initiator: room.user1.initiator,
+              user2Initiator: room.user2.initiator
+            });
           } else {
             console.log(`[SERVER] User ${userId} tried to join non-existent room ${data.room}`);
+            console.log(`[SERVER] Available rooms:`, Array.from(activeRooms.keys()));
           }
           break;
           
