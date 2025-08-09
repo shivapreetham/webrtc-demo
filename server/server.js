@@ -17,23 +17,19 @@ const queue = []; // FIFO queue of waiting userIds
 const activeRooms = new Map(); // roomId -> { user1, user2, created }
 const tokenToUser = new Map(); // token -> { userId, socketId|null, roomId|null, cleanupTimer|null }
 const userConnections = new Map(); // userId -> socketId
-const userCount = { count: 0 };
+let userCount = 0;
 
 // Config
-const ROOM_TTL_MS = 2 * 60 * 1000; // keep room for 2 minutes if someone disconnects
+const ROOM_RECONNECT_TTL_MS = 2 * 60 * 1000; // 2 minutes
 
-// --- Helpers ---
+// Helpers
 const generateId = () => Math.random().toString(36).substr(2, 9);
 const generateRoomId = () => Math.random().toString(36).substr(2, 12);
 const generateToken = () => crypto.randomBytes(16).toString('hex');
 
-const determineInitiator = (user1Id, user1Data, user2Id, user2Data) => {
-  if (user1Data.joinTime < user2Data.joinTime) return { initiator: user1Id, responder: user2Id };
-  if (user2Data.joinTime < user1Data.joinTime) return { initiator: user2Id, responder: user1Id };
-  return user1Id < user2Id ? { initiator: user1Id, responder: user2Id } : { initiator: user2Id, responder: user1Id };
+const broadcastUserCount = () => {
+  io.emit('user_count', { count: userCount });
 };
-
-const broadcastUserCount = () => io.emit('user_count', { count: userCount.count });
 
 const cleanupUserFromWaiting = (userId) => {
   if (waitingUsers.has(userId)) waitingUsers.delete(userId);
@@ -42,143 +38,130 @@ const cleanupUserFromWaiting = (userId) => {
 };
 
 const scheduleTokenCleanup = (token) => {
-  const entry = tokenToUser.get(token);
-  if (!entry) return;
-  // If already scheduled, ignore
-  if (entry.cleanupTimer) return;
-  entry.cleanupTimer = setTimeout(() => {
-    // If still disconnected and not in room, remove token
-    const e = tokenToUser.get(token);
-    if (e && (!e.socketId) && !e.roomId) {
+  const e = tokenToUser.get(token);
+  if (!e) return;
+  if (e.cleanupTimer) return;
+  e.cleanupTimer = setTimeout(() => {
+    const cur = tokenToUser.get(token);
+    if (cur && !cur.socketId && !cur.roomId) {
       tokenToUser.delete(token);
-      console.log(`[SERVER] Token ${token} expired and removed`);
-    } else if (e && (!e.socketId) && e.roomId) {
-      // If room exists but both disconnected, server cleanup handled by room TTL loop
-      console.log(`[SERVER] Token ${token} disconnected but room still exists`);
+      console.log(`[SERVER] Token expired and removed: ${token}`);
     }
-    if (e) e.cleanupTimer = null;
-  }, ROOM_TTL_MS);
+    if (cur) cur.cleanupTimer = null;
+  }, ROOM_RECONNECT_TTL_MS);
 };
 
 const cancelTokenCleanup = (token) => {
-  const entry = tokenToUser.get(token);
-  if (entry && entry.cleanupTimer) {
-    clearTimeout(entry.cleanupTimer);
-    entry.cleanupTimer = null;
+  const e = tokenToUser.get(token);
+  if (e && e.cleanupTimer) {
+    clearTimeout(e.cleanupTimer);
+    e.cleanupTimer = null;
   }
 };
 
-const cleanupRoomIfEmpty = (roomId) => {
+const cleanupRoomIfBothDisconnected = (roomId) => {
   const room = activeRooms.get(roomId);
   if (!room) return;
-  const u1alive = io.sockets.sockets.get(room.user1.socketId);
-  const u2alive = io.sockets.sockets.get(room.user2.socketId);
-  // if both gone -> remove room
-  if (!u1alive && !u2alive) {
+  const alive1 = io.sockets.sockets.get(room.user1.socketId);
+  const alive2 = io.sockets.sockets.get(room.user2.socketId);
+  if (!alive1 && !alive2) {
     activeRooms.delete(roomId);
-    console.log(`[SERVER] Room ${roomId} removed (both peers disconnected)`);
-    // update tokenToUser roomId -> null
-    for (const [token, entry] of tokenToUser.entries()) {
-      if (entry.userId === room.user1.id || entry.userId === room.user2.id) entry.roomId = null;
+    console.log(`[SERVER] Room ${roomId} removed (both disconnected)`);
+    // update tokenToUser entries
+    for (const [tkn, ud] of tokenToUser.entries()) {
+      if (ud.userId === room.user1.id || ud.userId === room.user2.id) ud.roomId = null;
     }
   }
 };
 
-// pairing helper that consumes queue until finds a live waiting user
-const tryPairWithQueue = (requestingUserId) => {
+// Pairing helper: pop queue until find live waiting user
+const popCandidateFromQueue = (requesterId) => {
   while (queue.length > 0) {
-    const candidateId = queue.shift();
-    if (!candidateId || candidateId === requestingUserId) continue;
-    if (!waitingUsers.has(candidateId)) continue;
-    const candidateData = waitingUsers.get(candidateId);
-    const candidateSocketAlive = candidateData.socket && io.sockets.sockets.get(candidateData.socketId);
-    if (!candidateSocketAlive) {
-      waitingUsers.delete(candidateId);
+    const cand = queue.shift();
+    if (!cand || cand === requesterId) continue;
+    if (!waitingUsers.has(cand)) continue;
+    const candData = waitingUsers.get(cand);
+    if (!candData || !io.sockets.sockets.get(candData.socketId)) {
+      waitingUsers.delete(cand);
       continue;
     }
-    return { userId: candidateId, userData: candidateData };
+    return { userId: cand, userData: candData };
   }
   return null;
 };
 
-// --- Connection handling ---
-io.on('connection', (socket) => {
-  // Prefer client-provided token in auth for stable identity
-  const clientToken = socket.handshake.auth && socket.handshake.auth.token;
-  let userId;
-  let token;
+// Determine initiator by joinTime or id order
+const determineInitiator = (aId, aData, bId, bData) => {
+  if ((aData.joinTime||0) < (bData.joinTime||0)) return { initiator: aId, responder: bId };
+  if ((bData.joinTime||0) < (aData.joinTime||0)) return { initiator: bId, responder: aId };
+  return aId < bId ? { initiator: aId, responder: bId } : { initiator: bId, responder: aId };
+};
 
+// Basic debug endpoint (only in dev)
+app.get('/debug', (req, res) => {
+  res.json({
+    usersWaiting: Array.from(waitingUsers.keys()),
+    queue,
+    activeRooms: Array.from(activeRooms.entries()).map(([id, r]) => ({
+      id, user1: r.user1.id, user2: r.user2.id, created: r.created
+    })),
+    tokens: Array.from(tokenToUser.entries()).map(([t, v]) => ({ token: t, userId: v.userId, roomId: v.roomId, socketId: v.socketId })),
+    userCount
+  });
+});
+
+// Socket.IO
+io.on('connection', (socket) => {
+  // If client passed token in auth, try to reattach
+  const clientToken = (socket.handshake && socket.handshake.auth && socket.handshake.auth.token) || null;
+  let userId, token;
   if (clientToken && tokenToUser.has(clientToken)) {
-    // Re-attach to existing identity
     const entry = tokenToUser.get(clientToken);
     token = clientToken;
     userId = entry.userId;
     entry.socketId = socket.id;
-    entry.lastSeen = Date.now();
-    cancelTokenCleanup(clientToken);
-    console.log(`[SERVER] Socket reattached to existing token ${token} -> user ${userId}`);
+    cancelTokenCleanup(token);
     socket.userId = userId;
     socket.token = token;
     userConnections.set(userId, socket.id);
     socket.emit('reconnect_success', { room: entry.roomId || null, userId });
-    // If user had a room, update room socket references and inform partner
+    console.log(`[SERVER] Reattached socket to existing token ${token} -> user ${userId}`);
+    // If user had a room, update room references and notify partner
     if (entry.roomId && activeRooms.has(entry.roomId)) {
       const room = activeRooms.get(entry.roomId);
-      // update whichever user slot belongs to this userId
-      if (room.user1.id === userId) {
-        room.user1.socket = socket;
-        room.user1.socketId = socket.id;
-      } else if (room.user2.id === userId) {
-        room.user2.socket = socket;
-        room.user2.socketId = socket.id;
-      }
-      // Notify partner if partner is connected
+      if (room.user1.id === userId) { room.user1.socket = socket; room.user1.socketId = socket.id; }
+      if (room.user2.id === userId) { room.user2.socket = socket; room.user2.socketId = socket.id; }
       const partner = room.user1.id === userId ? room.user2 : room.user1;
-      const partnerSocket = io.sockets.sockets.get(partner.socketId);
-      if (partnerSocket) {
-        partnerSocket.emit('partner_reconnected', { room: entry.roomId, partnerId: userId });
-      }
+      const otherSocket = io.sockets.sockets.get(partner.socketId);
+      if (otherSocket) otherSocket.emit('partner_reconnected', { room: entry.roomId, partnerId: userId });
     }
-    // update user counters? not increasing because it is reattach
   } else {
-    // Brand new user
+    // new user
     userId = generateId();
     token = generateToken();
     socket.userId = userId;
     socket.token = token;
-    tokenToUser.set(token, { userId, socketId: socket.id, roomId: null, cleanupTimer: null, lastSeen: Date.now() });
+    tokenToUser.set(token, { userId, socketId: socket.id, roomId: null, cleanupTimer: null });
     userConnections.set(userId, socket.id);
-    userCount.count++;
+    userCount++;
     broadcastUserCount();
-    console.log(`[SERVER] New user ${userId} connected - token ${token}. Total: ${userCount.count}`);
     socket.emit('welcome', { userId, token });
+    console.log(`[SERVER] New user ${userId} connected (socket ${socket.id}). Total users: ${userCount}`);
   }
 
-  // --- Handle manual reconnect_user as well (keep for backward compatibility) ---
+  // reconnect_user (backwards compat)
   socket.on('reconnect_user', (data) => {
-    const { token: clientToken2 } = data || {};
-    if (!clientToken2) { socket.emit('reconnect_failed'); return; }
-    const entry = tokenToUser.get(clientToken2);
+    const clientToken = data && data.token;
+    if (!clientToken) { socket.emit('reconnect_failed'); return; }
+    const entry = tokenToUser.get(clientToken);
     if (entry && entry.userId) {
       entry.socketId = socket.id;
       socket.userId = entry.userId;
-      socket.token = clientToken2;
+      socket.token = clientToken;
       userConnections.set(entry.userId, socket.id);
-      cancelTokenCleanup(clientToken2);
-
-      // update waiting/room socket refs
-      if (waitingUsers.has(entry.userId)) {
-        const u = waitingUsers.get(entry.userId);
-        u.socket = socket; u.socketId = socket.id; waitingUsers.set(entry.userId, u);
-      }
-      for (const [roomId, room] of activeRooms.entries()) {
-        if (room.user1.id === entry.userId) { room.user1.socket = socket; room.user1.socketId = socket.id; }
-        if (room.user2.id === entry.userId) { room.user2.socket = socket; room.user2.socketId = socket.id; }
-      }
-
+      cancelTokenCleanup(clientToken);
       socket.emit('reconnect_success', { room: entry.roomId || null, userId: entry.userId });
-      console.log(`[SERVER] Reconnect successful for ${entry.userId}`);
-      // notify partner if in room
+      console.log(`[SERVER] reconnect_user success for ${entry.userId}`);
       if (entry.roomId && activeRooms.has(entry.roomId)) {
         const room = activeRooms.get(entry.roomId);
         const partner = room.user1.id === entry.userId ? room.user2 : room.user1;
@@ -187,109 +170,83 @@ io.on('connection', (socket) => {
       }
     } else {
       socket.emit('reconnect_failed');
-      console.log(`[SERVER] Reconnect failed for token ${clientToken2}`);
     }
   });
 
-  // --- find_partner ---
+  // find_partner
   socket.on('find_partner', (data) => {
-    const { audioEnabled = true, videoEnabled = true } = data || {};
-    console.log(`[SERVER] User ${socket.userId} looking for partner`);
-
-    const userIdLocal = socket.userId;
-
-    // Do not allow pairing if user already in a room or waiting
-    const alreadyInRoom = Array.from(activeRooms.values()).some(r => r.user1.id === userIdLocal || r.user2.id === userIdLocal);
-    if (alreadyInRoom) { console.log(`[SERVER] User ${userIdLocal} already in a room`); return; }
-    if (waitingUsers.has(userIdLocal)) { console.log(`[SERVER] User ${userIdLocal} already waiting`); return; }
-
-    // Attempt to pair from queue
-    const partner = tryPairWithQueue(userIdLocal);
-    if (partner) {
+    const audioEnabled = (data && data.audioEnabled) !== false;
+    const videoEnabled = (data && data.videoEnabled) !== false;
+    console.log(`[SERVER] find_partner from ${socket.userId}`);
+    // Avoid pairing if already in room or waiting
+    if (Array.from(activeRooms.values()).some(r => r.user1.id === socket.userId || r.user2.id === socket.userId)) {
+      console.log(`[SERVER] ${socket.userId} already in a room`);
+      return;
+    }
+    if (waitingUsers.has(socket.userId)) {
+      console.log(`[SERVER] ${socket.userId} already waiting`);
+      return;
+    }
+    // try pop candidate
+    const candidate = popCandidateFromQueue(socket.userId);
+    if (candidate) {
       const roomId = generateRoomId();
-      console.log(`[SERVER] Pairing ${userIdLocal} with ${partner.userId} into room ${roomId}`);
-
-      waitingUsers.delete(partner.userId);
-      waitingUsers.delete(userIdLocal);
-
-      const myJoinTime = Date.now();
-      const partnerJoinTime = partner.userData.joinTime || Date.now();
-      const roles = determineInitiator(
-        userIdLocal, { joinTime: myJoinTime },
-        partner.userId, { joinTime: partnerJoinTime }
-      );
-
-      const initiatorSocket = roles.initiator === userIdLocal ? socket : partner.userData.socket;
-      const initiatorSocketId = roles.initiator === userIdLocal ? socket.id : partner.userData.socketId;
-      const responderSocket = roles.responder === userIdLocal ? socket : partner.userData.socket;
-      const responderSocketId = roles.responder === userIdLocal ? socket.id : partner.userData.socketId;
-
+      waitingUsers.delete(candidate.userId);
+      // create roles
+      const roles = determineInitiator(socket.userId, { joinTime: Date.now() }, candidate.userId, { joinTime: candidate.userData.joinTime });
+      const initiatorSocket = roles.initiator === socket.userId ? socket : candidate.userData.socket;
+      const initiatorSocketId = initiatorSocket.id;
+      const responderSocket = roles.responder === socket.userId ? socket : candidate.userData.socket;
+      const responderSocketId = responderSocket.id;
       const roomData = {
         user1: { id: roles.initiator, socket: initiatorSocket, socketId: initiatorSocketId, initiator: true },
         user2: { id: roles.responder, socket: responderSocket, socketId: responderSocketId, initiator: false },
         created: Date.now()
       };
-
       activeRooms.set(roomId, roomData);
-
-      // update tokenToUser entries to reference the new room
-      for (const [tkn, ud] of tokenToUser.entries()) {
-        if (ud.userId === roles.initiator || ud.userId === roles.responder) ud.roomId = roomId;
+      // update tokens
+      for (const [tkn, v] of tokenToUser.entries()) {
+        if (v.userId === roles.initiator || v.userId === roles.responder) v.roomId = roomId;
       }
-
-      if (roomData.user1.socket) {
-        roomData.user1.socket.emit('room_assigned', { room: roomId, initiator: true, role: 'initiator', partnerId: roles.responder });
-      }
-      if (roomData.user2.socket) {
-        roomData.user2.socket.emit('room_assigned', { room: roomId, initiator: false, role: 'responder', partnerId: roles.initiator });
-      }
-
+      // notify both
+      if (roomData.user1.socket) roomData.user1.socket.emit('room_assigned', { room: roomId, initiator: true, role: 'initiator', partnerId: roles.responder });
+      if (roomData.user2.socket) roomData.user2.socket.emit('room_assigned', { room: roomId, initiator: false, role: 'responder', partnerId: roles.initiator });
       console.log(`[SERVER] Room ${roomId} created: ${roles.initiator} (init) & ${roles.responder} (resp)`);
       return;
     }
-
-    // otherwise add to waiting queue
-    waitingUsers.set(userIdLocal, { socket, socketId: socket.id, audioEnabled, videoEnabled, joinTime: Date.now(), token: socket.token });
-    queue.push(userIdLocal);
-    console.log(`[SERVER] User ${userIdLocal} added to waiting queue. Queue len: ${queue.length}`);
+    // otherwise add to waiting queue and push id
+    waitingUsers.set(socket.userId, { socket, socketId: socket.id, audioEnabled, videoEnabled, joinTime: Date.now(), token: socket.token });
+    queue.push(socket.userId);
+    console.log(`[SERVER] ${socket.userId} added to waiting (queue len: ${queue.length})`);
   });
 
-  // --- join_room ---
+  // join_room
   socket.on('join_room', (data) => {
-    const { room: roomToJoin } = data || {};
-    console.log(`[SERVER] ${socket.userId} joining room ${roomToJoin}`);
+    const roomToJoin = data && data.room;
+    console.log(`[SERVER] ${socket.userId} join_room ${roomToJoin}`);
     const room = activeRooms.get(roomToJoin);
     if (!room) { socket.emit('join_failed', { reason: 'no_room' }); return; }
-
-    // ensure user is authorized for this room (their userId must match)
     const isUser1 = room.user1.id === socket.userId;
     const isUser2 = room.user2.id === socket.userId;
-    if (isUser1 || isUser2) {
-      // update socket references
-      if (isUser1) { room.user1.socket = socket; room.user1.socketId = socket.id; }
-      if (isUser2) { room.user2.socket = socket; room.user2.socketId = socket.id; }
-
-      socket.emit('room_joined', {
-        room: roomToJoin,
-        initiator: isUser1 ? room.user1.initiator : room.user2.initiator,
-        role: (isUser1 ? room.user1.initiator : room.user2.initiator) ? 'initiator' : 'responder',
-        partnerId: isUser1 ? room.user2.id : room.user1.id
-      });
-
-      console.log(`[SERVER] ${socket.userId} joined room ${roomToJoin} as ${isUser1 ? (room.user1.initiator ? 'initiator' : 'responder') : (room.user2.initiator ? 'initiator' : 'responder')}`);
-    } else {
-      socket.emit('join_failed', { reason: 'not_authorized' });
-    }
+    if (!isUser1 && !isUser2) { socket.emit('join_failed', { reason: 'not_authorized' }); return; }
+    if (isUser1) { room.user1.socket = socket; room.user1.socketId = socket.id; }
+    if (isUser2) { room.user2.socket = socket; room.user2.socketId = socket.id; }
+    socket.emit('room_joined', {
+      room: roomToJoin,
+      initiator: isUser1 ? room.user1.initiator : room.user2.initiator,
+      role: (isUser1 ? room.user1.initiator : room.user2.initiator) ? 'initiator' : 'responder',
+      partnerId: isUser1 ? room.user2.id : room.user1.id
+    });
+    console.log(`[SERVER] ${socket.userId} joined room ${roomToJoin} as ${isUser1 || isUser2 ? (isUser1 ? (room.user1.initiator ? 'initiator' : 'responder') : (room.user2.initiator ? 'initiator' : 'responder')) : 'unknown'}`);
   });
 
-  // --- skip ---
+  // skip
   socket.on('skip', () => {
-    // if user is in active room, notify partner and remove room
+    // If in active room, notify partner and remove
     const userRoom = Array.from(activeRooms.entries()).find(([_, r]) => r.user1.id === socket.userId || r.user2.id === socket.userId);
     if (userRoom) {
       const [roomId, roomData] = userRoom;
       const otherUser = roomData.user1.id === socket.userId ? roomData.user2 : roomData.user1;
-      console.log(`[SERVER] ${socket.userId} skipping in room ${roomId}`);
       const otherSocket = io.sockets.sockets.get(otherUser.socketId);
       if (otherSocket) otherSocket.emit('partner_skipped');
       activeRooms.delete(roomId);
@@ -298,124 +255,100 @@ io.on('connection', (socket) => {
       }
       return;
     }
-
     // if waiting, remove from waiting
-    if (waitingUsers.has(socket.userId)) { cleanupUserFromWaiting(socket.userId); console.log(`[SERVER] ${socket.userId} skipped while waiting`); }
+    cleanupUserFromWaiting(socket.userId);
   });
 
-  // --- signaling relays ---
+  // signaling events
   socket.on('offer', (data) => {
-    const { room: targetRoomId, offer } = data || {};
-    const room = activeRooms.get(targetRoomId);
+    const room = activeRooms.get(data && data.room);
     if (!room) return;
     const isUser1 = room.user1.id === socket.userId;
     const isUser2 = room.user2.id === socket.userId;
     if (!isUser1 && !isUser2) return;
-    const targetUser = isUser1 ? room.user2 : room.user1;
-    const targetSocket = io.sockets.sockets.get(targetUser.socketId);
+    const target = isUser1 ? room.user2 : room.user1;
+    const targetSocket = io.sockets.sockets.get(target.socketId);
     if (targetSocket) {
-      targetSocket.emit('offer', { offer, senderId: socket.userId });
-      console.log(`[SERVER] Forwarded offer from ${socket.userId} to ${targetUser.id}`);
+      // forward
+      targetSocket.emit('offer', { offer: data.offer, senderId: socket.userId });
+      console.log(`[SERVER] Forwarded offer from ${socket.userId} to ${target.id}`);
     }
   });
 
   socket.on('answer', (data) => {
-    const { room: targetRoomId, answer } = data || {};
-    const room = activeRooms.get(targetRoomId);
+    const room = activeRooms.get(data && data.room);
     if (!room) return;
     const isUser1 = room.user1.id === socket.userId;
     const isUser2 = room.user2.id === socket.userId;
     if (!isUser1 && !isUser2) return;
-    const targetUser = isUser1 ? room.user2 : room.user1;
-    const targetSocket = io.sockets.sockets.get(targetUser.socketId);
+    const target = isUser1 ? room.user2 : room.user1;
+    const targetSocket = io.sockets.sockets.get(target.socketId);
     if (targetSocket) {
-      targetSocket.emit('answer', { answer, senderId: socket.userId });
-      console.log(`[SERVER] Forwarded answer from ${socket.userId} to ${targetUser.id}`);
+      targetSocket.emit('answer', { answer: data.answer, senderId: socket.userId });
+      console.log(`[SERVER] Forwarded answer from ${socket.userId} to ${target.id}`);
     }
   });
 
   socket.on('ice-candidate', (data) => {
-    const { room: targetRoomId, candidate } = data || {};
-    const room = activeRooms.get(targetRoomId);
+    const room = activeRooms.get(data && data.room);
     if (!room) return;
     const isUser1 = room.user1.id === socket.userId;
     const isUser2 = room.user2.id === socket.userId;
     if (!isUser1 && !isUser2) return;
-    const targetUser = isUser1 ? room.user2 : room.user1;
-    const targetSocket = io.sockets.sockets.get(targetUser.socketId);
+    const target = isUser1 ? room.user2 : room.user1;
+    const targetSocket = io.sockets.sockets.get(target.socketId);
     if (targetSocket) {
-      targetSocket.emit('ice-candidate', { candidate, senderId: socket.userId });
+      targetSocket.emit('ice-candidate', { candidate: data.candidate, senderId: socket.userId });
     }
   });
-    // --- REQUEST RE-OFFER RELAY (responder asks initiator to re-offer) ---
+
+  // request_reoffer (responder asks initiator to re-offer)
   socket.on('request_reoffer', (data) => {
-    const { room: targetRoomId } = data || {};
-    const room = activeRooms.get(targetRoomId);
+    const room = activeRooms.get(data && data.room);
     if (!room) return;
-    const isUser1 = room.user1.id === socket.userId;
-    const isUser2 = room.user2.id === socket.userId;
-    if (!isUser1 && !isUser2) return;
-    // Who is initiator?
     const initiatorUser = room.user1.initiator ? room.user1 : (room.user2.initiator ? room.user2 : null);
     if (!initiatorUser) return;
     const initiatorSocket = io.sockets.sockets.get(initiatorUser.socketId);
     if (initiatorSocket) {
-      initiatorSocket.emit('request_reoffer', { room: targetRoomId, requester: socket.userId });
-      console.log(`[SERVER] ${socket.userId} requested re-offer in room ${targetRoomId}`);
+      initiatorSocket.emit('request_reoffer', { room: data.room, requester: socket.userId });
+      console.log(`[SERVER] ${socket.userId} requested re-offer in room ${data.room}`);
     }
   });
 
-  // --- disconnect handling ---
+  // disconnect
   socket.on('disconnect', () => {
-    const uid = socket.userId;
-    console.log(`[SERVER] Socket disconnected for user ${uid}`);
-    // mark token mapping socketId = null and schedule cleanup
+    console.log(`[SERVER] Socket disconnected for user ${socket.userId}`);
+    // mark token socketId null and schedule cleanup
     for (const [tkn, entry] of tokenToUser.entries()) {
-      if (entry.userId === uid) {
+      if (entry.userId === socket.userId) {
         entry.socketId = null;
         entry.lastSeen = Date.now();
         scheduleTokenCleanup(tkn);
         break;
       }
     }
-
-    // do not immediately remove from room - keep for ROOM_TTL_MS to allow reconnect
-    // notify partner that this user disconnected
-    for (const [roomId, roomData] of activeRooms.entries()) {
-      if (roomData.user1.id === uid || roomData.user2.id === uid) {
-        const otherUser = roomData.user1.id === uid ? roomData.user2 : roomData.user1;
-        const otherSocket = io.sockets.sockets.get(otherUser.socketId);
-        if (otherSocket) otherSocket.emit('partner_disconnected', { room: roomId, partnerId: uid });
-        // schedule room cleanup after TTL if both disconnected
-        setTimeout(() => cleanupRoomIfEmpty(roomId), ROOM_TTL_MS + 1000);
+    // notify partner if in room; keep room alive for TTL
+    for (const [roomId, room] of activeRooms.entries()) {
+      if (room.user1.id === socket.userId || room.user2.id === socket.userId) {
+        const other = room.user1.id === socket.userId ? room.user2 : room.user1;
+        const otherSocket = io.sockets.sockets.get(other.socketId);
+        if (otherSocket) otherSocket.emit('partner_disconnected', { room: roomId, partnerId: socket.userId });
+        // schedule cleanup after TTL
+        setTimeout(() => cleanupRoomIfBothDisconnected(roomId), ROOM_RECONNECT_TTL_MS + 1000);
         break;
       }
     }
-
-    // remove from waiting queue
-    cleanupUserFromWaiting(uid);
-
-    // decrease count only if tokenToUser doesn't have a live socket (i.e., truly gone)
-    userCount.count = Math.max(0, userCount.count - 0); // keep unchanged because we keep user identity
+    // cleanup waiting
+    cleanupUserFromWaiting(socket.userId);
+    // don't decrement userCount here (we count logical users via tokens)
     broadcastUserCount();
   });
+});
 
-}); // io.on('connection')
-
-
-// periodic cleanup & logging
+// periodic status log
 setInterval(() => {
-  const now = Date.now();
-  let cleanedRooms = 0;
-  for (const [roomId, roomData] of activeRooms.entries()) {
-    if (now - roomData.created > 30 * 60 * 1000) { // longer hard cap for zombie rooms
-      activeRooms.delete(roomId);
-      cleanedRooms++;
-    }
-  }
-  console.log(`[SERVER] Status - Active rooms: ${activeRooms.size}, Waiting queue: ${queue.length}, Tokens: ${tokenToUser.size}`);
-  if (queue.length > 0) console.log(`[SERVER] Queue: ${queue.join(', ')}`);
+  console.log(`[SERVER] status: rooms=${activeRooms.size}, queue=${queue.length}, waiting=${waitingUsers.size}, tokens=${tokenToUser.size}, usersConnected=${userCount}`);
 }, 30000);
 
 const PORT = process.env.PORT || 3001;
-server.listen(PORT, () => console.log(`[SERVER] Socket.IO server running on port ${PORT}`));
+server.listen(PORT, () => console.log(`[SERVER] listening on ${PORT}`));
