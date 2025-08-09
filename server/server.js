@@ -7,7 +7,7 @@ const app = express();
 const server = http.createServer(app);
 
 const io = socketIo(server, {
-  cors: { origin: "*", methods: ["GET", "POST"] },
+  cors: { origin: '*', methods: ['GET', 'POST'] },
   transports: ['websocket', 'polling'],
 });
 
@@ -26,8 +26,8 @@ const cleanupUser = (userId) => {
   const user = users.get(userId);
   if (!user) return;
 
-  const qi = waitingQueue.indexOf(userId);
-  if (qi > -1) waitingQueue.splice(qi, 1);
+  const queueIndex = waitingQueue.indexOf(userId);
+  if (queueIndex > -1) waitingQueue.splice(queueIndex, 1);
 
   if (user.roomId) {
     const room = rooms.get(user.roomId);
@@ -51,21 +51,27 @@ const createRoom = (user1Id, user2Id) => {
   const user2 = users.get(user2Id);
   if (!user1 || !user2) return null;
 
-  const i1 = waitingQueue.indexOf(user1Id); if (i1 > -1) waitingQueue.splice(i1, 1);
-  const i2 = waitingQueue.indexOf(user2Id); if (i2 > -1) waitingQueue.splice(i2, 1);
+  const i1 = waitingQueue.indexOf(user1Id);
+  if (i1 > -1) waitingQueue.splice(i1, 1);
+  const i2 = waitingQueue.indexOf(user2Id);
+  if (i2 > -1) waitingQueue.splice(i2, 1);
 
   const room = { user1Id, user2Id, createdAt: Date.now() };
   rooms.set(roomId, room);
   user1.roomId = roomId;
   user2.roomId = roomId;
 
-  const initiator = (user1.waitingSince <= user2.waitingSince) ? user1Id : user2Id;
+  const initiator = user1.waitingSince && user2.waitingSince && user1.waitingSince <= user2.waitingSince ? user1Id : user2Id;
 
   user1.socket.emit('room_assigned', {
-    roomId, partnerId: user2Id, isInitiator: initiator === user1Id
+    roomId,
+    partnerId: user2Id,
+    isInitiator: initiator === user1Id,
   });
   user2.socket.emit('room_assigned', {
-    roomId, partnerId: user1Id, isInitiator: initiator === user2Id
+    roomId,
+    partnerId: user1Id,
+    isInitiator: initiator === user2Id,
   });
 
   console.log(`Room ${roomId} created: ${user1Id} <-> ${user2Id}`);
@@ -73,7 +79,7 @@ const createRoom = (user1Id, user2Id) => {
   return roomId;
 };
 
-app.get('/status', (req, res) => {
+app.get('/status', (_req, res) => {
   res.json({ users: users.size, waiting: waitingQueue.length, rooms: rooms.size });
 });
 
@@ -90,7 +96,7 @@ io.on('connection', (socket) => {
       socket,
       token,
       roomId: null,
-      waitingSince: null
+      waitingSince: null,
     });
 
     socket.emit('init_success', { userId, token });
@@ -111,8 +117,7 @@ io.on('connection', (socket) => {
 
     while (waitingQueue.length > 0) {
       const partnerId = waitingQueue.shift();
-      if (!users.has(partnerId)) continue;
-      if (partnerId === userId) continue;
+      if (!users.has(partnerId) || partnerId === userId) continue;
       createRoom(partnerId, userId);
       return;
     }
@@ -121,7 +126,7 @@ io.on('connection', (socket) => {
     waitingQueue.push(userId);
     socket.emit('searching');
     broadcastUserCount();
-    console.log(`User ${userId} added to waiting queue. queue length: ${waitingQueue.length}`);
+    console.log(`User ${userId} added to waiting queue. Queue length: ${waitingQueue.length}`);
   });
 
   socket.on('join_room', (data) => {
@@ -159,8 +164,8 @@ io.on('connection', (socket) => {
       }
     }
 
-    const qidx = waitingQueue.indexOf(userId);
-    if (qidx > -1) waitingQueue.splice(qidx, 1);
+    const queueIndex = waitingQueue.indexOf(userId);
+    if (queueIndex > -1) waitingQueue.splice(queueIndex, 1);
 
     user.waitingSince = null;
     broadcastUserCount();
@@ -209,20 +214,20 @@ io.on('connection', (socket) => {
       partner.socket.emit('chat_message', {
         message: data.message.trim().substring(0, 500),
         from: userId,
-        timestamp: Date.now()
+        timestamp: Date.now(),
       });
     }
   });
 
   socket.on('disconnect', () => {
-    console.log('Socket disconnected:', socket.id, 'userId', userId);
+    console.log('Socket disconnected:', socket.id, 'userId:', userId);
     if (userId) cleanupUser(userId);
   });
 });
 
 setInterval(() => {
   const now = Date.now();
-  const maxAge = 30 * 60 * 1000;
+  const maxAge = 30 * 60 * 1000; // 30 minutes
   for (const [roomId, room] of rooms.entries()) {
     if (now - room.createdAt > maxAge) {
       rooms.delete(roomId);
