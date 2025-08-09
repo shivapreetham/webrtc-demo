@@ -347,6 +347,23 @@ io.on('connection', (socket) => {
       targetSocket.emit('ice-candidate', { candidate, senderId: socket.userId });
     }
   });
+    // --- REQUEST RE-OFFER RELAY (responder asks initiator to re-offer) ---
+  socket.on('request_reoffer', (data) => {
+    const { room: targetRoomId } = data || {};
+    const room = activeRooms.get(targetRoomId);
+    if (!room) return;
+    const isUser1 = room.user1.id === socket.userId;
+    const isUser2 = room.user2.id === socket.userId;
+    if (!isUser1 && !isUser2) return;
+    // Who is initiator?
+    const initiatorUser = room.user1.initiator ? room.user1 : (room.user2.initiator ? room.user2 : null);
+    if (!initiatorUser) return;
+    const initiatorSocket = io.sockets.sockets.get(initiatorUser.socketId);
+    if (initiatorSocket) {
+      initiatorSocket.emit('request_reoffer', { room: targetRoomId, requester: socket.userId });
+      console.log(`[SERVER] ${socket.userId} requested re-offer in room ${targetRoomId}`);
+    }
+  });
 
   // --- disconnect handling ---
   socket.on('disconnect', () => {
