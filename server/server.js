@@ -7,15 +7,15 @@ const wss = new WebSocket.Server({ server });
 
 // Store active users and rooms
 const waitingUsers = new Map(); // userId -> { socket, audioEnabled, videoEnabled, joinTime, token }
-const activeRooms = new Map(); // roomId -> { user1, user2 }
-const tokenToUser = new Map(); // token -> { userId, roomId? }
+const activeRooms = new Map(); // roomId -> { user1, user2, created }
+const tokenToUser = new Map(); // token -> { userId, socket, roomId? }
 const userConnections = new Map(); // userId -> socket (track current socket)
 const userCount = { count: 0 };
 
 // Generate unique IDs
 const generateId = () => Math.random().toString(36).substr(2, 9);
 const generateRoomId = () => Math.random().toString(36).substr(2, 12);
-const generateToken = () => crypto.randomBytes(12).toString('hex');
+const generateToken = () => crypto.randomBytes(16).toString('hex');
 
 // Determine initiator based on deterministic criteria
 const determineInitiator = (user1Id, user1Data, user2Id, user2Data) => {
@@ -91,8 +91,11 @@ const cleanupUser = (userId) => {
       activeRooms.delete(roomId);
       
       // Update token mapping for the other user
-      if (tokenToUser.has(otherUser.socket?.token)) {
-        tokenToUser.get(otherUser.socket.token).roomId = null;
+      for (const [token, userData] of tokenToUser.entries()) {
+        if (userData.userId === otherUser.id) {
+          userData.roomId = null;
+          break;
+        }
       }
       
       console.log(`[SERVER] Room ${roomId} closed due to user ${userId} disconnection`);
@@ -102,6 +105,20 @@ const cleanupUser = (userId) => {
   
   // Clean up user connections
   userConnections.delete(userId);
+};
+
+// Send message safely to socket
+const sendSafe = (socket, data) => {
+  if (socket && socket.readyState === WebSocket.OPEN) {
+    try {
+      socket.send(JSON.stringify(data));
+      return true;
+    } catch (err) {
+      console.warn('[SERVER] Error sending message:', err);
+      return false;
+    }
+  }
+  return false;
 };
 
 wss.on('connection', (ws) => {
@@ -119,27 +136,23 @@ wss.on('connection', (ws) => {
   userCount.count++;
   broadcastUserCount();
   
-  console.log(`[SERVER] User ${userId} connected. Token ${token}. Total users: ${userCount.count}`);
+  console.log(`[SERVER] User ${userId} connected. Token: ${token}. Total users: ${userCount.count}`);
 
   // Send welcome with token
-  try {
-    ws.send(JSON.stringify({ type: 'welcome', userId, token }));
-  } catch (err) {
-    console.warn('[SERVER] Error sending welcome message:', err);
-  }
+  sendSafe(ws, { type: 'welcome', userId, token });
 
   ws.on('message', (message) => {
     try {
       const data = JSON.parse(message);
       const curUserId = ws.userId;
-      console.log(`[SERVER] Received message from ${curUserId}:`, data.type);
+      console.log(`[SERVER] Received message from ${curUserId}:`, data.type, data.room || '');
       
       switch (data.type) {
         case 'reconnect': {
           const { token: clientToken } = data;
           const entry = tokenToUser.get(clientToken);
-          if (entry) {
-            // Replace socket reference with the new ws
+          if (entry && entry.userId) {
+            // Update socket reference
             entry.socket = ws;
             ws.userId = entry.userId;
             ws.token = clientToken;
@@ -147,21 +160,29 @@ wss.on('connection', (ws) => {
             
             // Update waitingUsers if present
             if (waitingUsers.has(entry.userId)) {
-              const u = waitingUsers.get(entry.userId);
-              u.socket = ws;
-              waitingUsers.set(entry.userId, u);
+              const userData = waitingUsers.get(entry.userId);
+              userData.socket = ws;
+              waitingUsers.set(entry.userId, userData);
             }
             
             // Update activeRooms user socket references
-            for (const [rid, room] of activeRooms.entries()) {
-              if (room.user1.id === entry.userId) room.user1.socket = ws;
-              if (room.user2.id === entry.userId) room.user2.socket = ws;
+            for (const [roomId, room] of activeRooms.entries()) {
+              if (room.user1.id === entry.userId) {
+                room.user1.socket = ws;
+              }
+              if (room.user2.id === entry.userId) {
+                room.user2.socket = ws;
+              }
             }
             
-            ws.send(JSON.stringify({ type: 'reconnect_ok', room: entry.roomId || null }));
+            sendSafe(ws, { 
+              type: 'reconnect_ok', 
+              room: entry.roomId || null,
+              userId: entry.userId 
+            });
             console.log(`[SERVER] Reconnect successful for token ${clientToken} -> user ${entry.userId}`);
           } else {
-            ws.send(JSON.stringify({ type: 'reconnect_failed' }));
+            sendSafe(ws, { type: 'reconnect_failed' });
             console.log(`[SERVER] Reconnect failed for token ${clientToken}`);
           }
           break;
@@ -209,7 +230,7 @@ wss.on('connection', (ws) => {
             );
             
             // Create room with proper roles
-            activeRooms.set(roomId, {
+            const roomData = {
               user1: { 
                 id: roles.initiator, 
                 socket: roles.initiator === curUserId ? ws : partnerData.socket, 
@@ -219,47 +240,41 @@ wss.on('connection', (ws) => {
                 id: roles.responder, 
                 socket: roles.responder === curUserId ? ws : partnerData.socket, 
                 initiator: false 
-              }
-            });
+              },
+              created: Date.now()
+            };
+            
+            activeRooms.set(roomId, roomData);
 
             // Update token mapping with roomId for both users
-            const initiatorToken = roles.initiator === curUserId ? ws.token : partnerData.socket?.token;
-            const responderToken = roles.responder === curUserId ? ws.token : partnerData.socket?.token;
-            
-            if (initiatorToken && tokenToUser.has(initiatorToken)) {
-              tokenToUser.get(initiatorToken).roomId = roomId;
-            }
-            if (responderToken && tokenToUser.has(responderToken)) {
-              tokenToUser.get(responderToken).roomId = roomId;
+            for (const [token, userData] of tokenToUser.entries()) {
+              if (userData.userId === roles.initiator || userData.userId === roles.responder) {
+                userData.roomId = roomId;
+              }
             }
             
             // Notify both users with their roles
-            const initiatorSocket = roles.initiator === curUserId ? ws : partnerData.socket;
-            const responderSocket = roles.responder === curUserId ? ws : partnerData.socket;
+            const initiatorData = {
+              type: 'room_assigned',
+              room: roomId,
+              initiator: true,
+              role: 'initiator',
+              partnerId: roles.responder
+            };
             
-            try {
-              console.log(`[SERVER] Sending room_assigned to initiator ${roles.initiator}`);
-              initiatorSocket.send(JSON.stringify({
-                type: 'room_assigned',
-                room: roomId,
-                initiator: true,
-                role: 'initiator'
-              }));
-            } catch (err) {
-              console.warn(`[SERVER] Error sending room_assigned to initiator:`, err);
-            }
+            const responderData = {
+              type: 'room_assigned',
+              room: roomId,
+              initiator: false,
+              role: 'responder',
+              partnerId: roles.initiator
+            };
             
-            try {
-              console.log(`[SERVER] Sending room_assigned to responder ${roles.responder}`);
-              responderSocket.send(JSON.stringify({
-                type: 'room_assigned',
-                room: roomId,
-                initiator: false,
-                role: 'responder'
-              }));
-            } catch (err) {
-              console.warn(`[SERVER] Error sending room_assigned to responder:`, err);
-            }
+            console.log(`[SERVER] Sending room_assigned to initiator ${roles.initiator}`);
+            sendSafe(roomData.user1.socket, initiatorData);
+            
+            console.log(`[SERVER] Sending room_assigned to responder ${roles.responder}`);
+            sendSafe(roomData.user2.socket, responderData);
             
             console.log(`[SERVER] Room ${roomId} created with ${roles.initiator} (initiator) and ${roles.responder} (responder)`);
           } else {
@@ -278,65 +293,51 @@ wss.on('connection', (ws) => {
         }
           
         case 'join': {
-          // Client asks to join existing room - optionally with token
           const { room: roomToJoin, token: clientToken } = data;
           console.log(`[SERVER] User ${curUserId} trying to join room ${roomToJoin} (token: ${clientToken || 'none'})`);
           const room = activeRooms.get(roomToJoin);
           
           if (room) {
-            // If token provided, use it to map this socket to the correct user slot
+            // Update socket references if token matches
             if (clientToken && tokenToUser.has(clientToken)) {
               const entry = tokenToUser.get(clientToken);
-              ws.userId = entry.userId;
-              ws.token = clientToken;
-              
-              // Update socket references in room if userIds match
-              if (room.user1.id === entry.userId) {
-                room.user1.socket = ws;
+              if (entry.userId === curUserId) {
                 entry.socket = ws;
-                userConnections.set(entry.userId, ws);
-              } else if (room.user2.id === entry.userId) {
-                room.user2.socket = ws;
-                entry.socket = ws;
-                userConnections.set(entry.userId, ws);
+                userConnections.set(curUserId, ws);
+                
+                // Update room socket references
+                if (room.user1.id === curUserId) {
+                  room.user1.socket = ws;
+                } else if (room.user2.id === curUserId) {
+                  room.user2.socket = ws;
+                }
               }
             }
             
-            // Re-send room assignment with role information
-            const isUser1 = room.user1.id === ws.userId;
-            const isUser2 = room.user2.id === ws.userId;
+            // Verify user belongs to this room
+            const isUser1 = room.user1.id === curUserId;
+            const isUser2 = room.user2.id === curUserId;
             
             if (isUser1 || isUser2) {
-              try {
-                ws.send(JSON.stringify({
-                  type: 'room_assigned',
-                  room: roomToJoin,
-                  initiator: isUser1 ? room.user1.initiator : room.user2.initiator,
-                  role: isUser1 
-                    ? (room.user1.initiator ? 'initiator' : 'responder') 
-                    : (room.user2.initiator ? 'initiator' : 'responder')
-                }));
-                console.log(`[SERVER] User ${ws.userId} joined room ${roomToJoin} as ${
-                  isUser1 
-                    ? (room.user1.initiator ? 'initiator' : 'responder') 
-                    : (room.user2.initiator ? 'initiator' : 'responder')
-                }`);
-              } catch (err) {
-                console.warn('[SERVER] Error sending room_assigned on join:', err);
-              }
+              const userData = isUser1 ? room.user1 : room.user2;
+              const partnerData = isUser1 ? room.user2 : room.user1;
+              
+              const joinResponse = {
+                type: 'room_joined',
+                room: roomToJoin,
+                initiator: userData.initiator,
+                role: userData.initiator ? 'initiator' : 'responder',
+                partnerId: partnerData.id
+              };
+              
+              sendSafe(ws, joinResponse);
+              console.log(`[SERVER] User ${curUserId} joined room ${roomToJoin} as ${userData.initiator ? 'initiator' : 'responder'}`);
             } else {
-              try {
-                ws.send(JSON.stringify({ type: 'join_failed', reason: 'not_in_room' }));
-              } catch (err) {
-                console.warn('[SERVER] Error sending join_failed:', err);
-              }
+              sendSafe(ws, { type: 'join_failed', reason: 'not_in_room' });
+              console.log(`[SERVER] User ${curUserId} not authorized for room ${roomToJoin}`);
             }
           } else {
-            try {
-              ws.send(JSON.stringify({ type: 'join_failed', reason: 'no_room' }));
-            } catch (err) {
-              console.warn('[SERVER] Error sending join_failed:', err);
-            }
+            sendSafe(ws, { type: 'join_failed', reason: 'no_room' });
             console.log(`[SERVER] User ${curUserId} tried to join non-existent room ${roomToJoin}`);
           }
           break;
@@ -355,25 +356,16 @@ wss.on('connection', (ws) => {
             console.log(`[SERVER] User ${curUserId} skipping in room ${roomId}`);
             
             // Notify the other user about the skip
-            try {
-              if (otherUser.socket && otherUser.socket.readyState === WebSocket.OPEN) {
-                otherUser.socket.send(JSON.stringify({
-                  type: 'partner_skipped'
-                }));
-              }
-            } catch (err) {
-              console.warn('[SERVER] Error sending partner_skipped:', err);
-            }
+            sendSafe(otherUser.socket, { type: 'partner_skipped' });
             
             // Close the room
             activeRooms.delete(roomId);
             
             // Update token mappings to clear roomId
-            if (tokenToUser.has(ws.token)) {
-              tokenToUser.get(ws.token).roomId = null;
-            }
-            if (otherUser.socket?.token && tokenToUser.has(otherUser.socket.token)) {
-              tokenToUser.get(otherUser.socket.token).roomId = null;
+            for (const [token, userData] of tokenToUser.entries()) {
+              if (userData.userId === curUserId || userData.userId === otherUser.id) {
+                userData.roomId = null;
+              }
             }
             
             console.log(`[SERVER] Room ${roomId} closed due to skip.`);
@@ -386,27 +378,37 @@ wss.on('connection', (ws) => {
         case 'offer':
         case 'answer':
         case 'candidate': {
-          const targetRoom = activeRooms.get(data.room);
-          const senderId = ws.userId;
+          const { room: targetRoomId, token: clientToken } = data;
+          const targetRoom = activeRooms.get(targetRoomId);
+          const senderId = curUserId;
           
           if (!targetRoom) {
-            console.warn(`[SERVER] No room ${data.room} for ${data.type} from ${senderId}`);
+            console.warn(`[SERVER] No room ${targetRoomId} for ${data.type} from ${senderId}`);
             break;
           }
           
-          const targetUser = targetRoom.user1.id === senderId
-            ? targetRoom.user2
-            : targetRoom.user1;
-            
-          if (targetUser.socket?.readyState === WebSocket.OPEN) {
-            try {
-              targetUser.socket.send(JSON.stringify(data));
-              console.log(`[SERVER] Forwarded ${data.type} from ${senderId} to ${targetUser.id} in room ${data.room}`);
-            } catch (err) {
-              console.warn(`[SERVER] Error forwarding ${data.type}:`, err);
-            }
+          // Verify sender is in the room
+          const isUser1 = targetRoom.user1.id === senderId;
+          const isUser2 = targetRoom.user2.id === senderId;
+          
+          if (!isUser1 && !isUser2) {
+            console.warn(`[SERVER] User ${senderId} not in room ${targetRoomId} for ${data.type}`);
+            break;
+          }
+          
+          const targetUser = isUser1 ? targetRoom.user2 : targetRoom.user1;
+          
+          // Forward the message to the target user
+          const forwardedData = {
+            ...data,
+            senderId,
+            room: targetRoomId
+          };
+          
+          if (sendSafe(targetUser.socket, forwardedData)) {
+            console.log(`[SERVER] Forwarded ${data.type} from ${senderId} to ${targetUser.id} in room ${targetRoomId}`);
           } else {
-            console.warn(`[SERVER] Target socket not open for ${targetUser.id} in room ${data.room}`);
+            console.warn(`[SERVER] Failed to forward ${data.type} to ${targetUser.id} in room ${targetRoomId}`);
           }
           break;
         }
@@ -426,11 +428,10 @@ wss.on('connection', (ws) => {
     // Clean up user
     cleanupUser(curUserId);
     
-    // Don't delete token mapping - keep it for potential reconnection
-    // Just set socket to null or keep it for reconnection attempts
+    // Keep token mapping for potential reconnection, just mark socket as null
     if (ws.token && tokenToUser.has(ws.token)) {
-      // Keep the entry but could mark socket as disconnected
-      // tokenToUser.get(ws.token).socket = null;
+      const userData = tokenToUser.get(ws.token);
+      userData.socket = null;
     }
     
     userCount.count = Math.max(0, userCount.count - 1);
@@ -452,13 +453,28 @@ server.listen(PORT, () => {
 
 // Cleanup inactive rooms and log status periodically
 setInterval(() => {
-  console.log(`[SERVER] Status - Active rooms: ${activeRooms.size}, Waiting users: ${waitingUsers.size}, Total users: ${userCount.count}`);
+  const now = Date.now();
+  let cleanedRooms = 0;
+  
+  // Clean up very old rooms (10 minutes)
+  for (const [roomId, roomData] of activeRooms.entries()) {
+    if (now - roomData.created > 10 * 60 * 1000) {
+      console.log(`[SERVER] Cleaning up old room: ${roomId}`);
+      activeRooms.delete(roomId);
+      cleanedRooms++;
+    }
+  }
+  
+  console.log(`[SERVER] Status - Active rooms: ${activeRooms.size}, Waiting users: ${waitingUsers.size}, Total users: ${userCount.count}, Cleaned: ${cleanedRooms}`);
   
   // Log active rooms for debugging
-  for (const [roomId, roomData] of activeRooms.entries()) {
-    const user1Role = roomData.user1.initiator ? 'initiator' : 'responder';
-    const user2Role = roomData.user2.initiator ? 'initiator' : 'responder';
-    console.log(`[SERVER] Active room: ${roomId} with ${roomData.user1.id} (${user1Role}) and ${roomData.user2.id} (${user2Role})`);
+  if (activeRooms.size > 0) {
+    console.log(`[SERVER] Active rooms:`);
+    for (const [roomId, roomData] of activeRooms.entries()) {
+      const user1Role = roomData.user1.initiator ? 'initiator' : 'responder';
+      const user2Role = roomData.user2.initiator ? 'initiator' : 'responder';
+      console.log(`  - ${roomId}: ${roomData.user1.id} (${user1Role}) & ${roomData.user2.id} (${user2Role})`);
+    }
   }
   
   // Log waiting users
@@ -468,7 +484,7 @@ setInterval(() => {
   
   // Cleanup stale connections
   for (const [userId, socket] of userConnections.entries()) {
-    if (socket.readyState === WebSocket.CLOSED) {
+    if (socket.readyState === WebSocket.CLOSED || socket.readyState === WebSocket.CLOSING) {
       console.log(`[SERVER] Cleaning up stale connection for user ${userId}`);
       cleanupUser(userId);
     }
