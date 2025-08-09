@@ -39,7 +39,7 @@ const cleanupUser = (userId) => {
       const partnerId = room.user1Id === userId ? room.user2Id : room.user1Id;
       const partner = users.get(partnerId);
       if (partner && partner.socket) {
-        partner.socket.emit('partner_disconnected');
+        try { partner.socket.emit('partner_disconnected'); } catch(e) {}
         partner.roomId = null;
       }
       rooms.delete(user.roomId);
@@ -72,23 +72,28 @@ const createRoom = (user1Id, user2Id) => {
   user1.roomId = roomId;
   user2.roomId = roomId;
 
-  // Determine initiator (first user in queue becomes initiator)
-  const initiator = user1.waitingSince <= user2.waitingSince ? user1Id : user2Id;
+  // Determine initiator (first user in queue becomes initiator: compare waitingSince)
+  const initiator = (user1.waitingSince <= user2.waitingSince) ? user1Id : user2Id;
 
   // Notify both users
-  user1.socket.emit('room_assigned', {
-    roomId,
-    partnerId: user2Id,
-    isInitiator: initiator === user1Id
-  });
+  try {
+    user1.socket.emit('room_assigned', {
+      roomId,
+      partnerId: user2Id,
+      isInitiator: initiator === user1Id
+    });
+  } catch (e) { /* ignore */ }
 
-  user2.socket.emit('room_assigned', {
-    roomId,
-    partnerId: user1Id,
-    isInitiator: initiator === user2Id
-  });
+  try {
+    user2.socket.emit('room_assigned', {
+      roomId,
+      partnerId: user1Id,
+      isInitiator: initiator === user2Id
+    });
+  } catch (e) { /* ignore */ }
 
   console.log(`Room ${roomId} created: ${user1Id} & ${user2Id}`);
+  broadcastUserCount();
   return roomId;
 };
 
@@ -107,6 +112,12 @@ io.on('connection', (socket) => {
   console.log('User connected:', socket.id);
 
   socket.on('init', (data) => {
+    // if already initialized for this socket, don't double-init
+    if (userId && users.has(userId)) {
+      socket.emit('init_success', { userId, token });
+      return;
+    }
+
     userId = generateId();
     token = generateToken();
 
@@ -129,26 +140,26 @@ io.on('connection', (socket) => {
     }
 
     const user = users.get(userId);
-    
+
     // Already in room or waiting
     if (user.roomId || waitingQueue.includes(userId)) {
       return;
     }
 
     // Try to match with someone in queue
-    if (waitingQueue.length > 0) {
-      const partnerId = waitingQueue[0];
+    while (waitingQueue.length > 0) {
+      const partnerId = waitingQueue.shift();
       const partner = users.get(partnerId);
-      
-      if (partner && partner.socket) {
-        createRoom(partnerId, userId);
-        broadcastUserCount();
-        return;
-      } else {
-        // Clean up invalid partner
-        waitingQueue.shift();
-        users.delete(partnerId);
+      if (!partner || !partner.socket) {
+        // stale, skip
+        continue;
       }
+      // If partner is same as user just skip (shouldn't happen)
+      if (partnerId === userId) continue;
+
+      // Create room
+      createRoom(partnerId, userId);
+      return;
     }
 
     // Add to waiting queue
@@ -156,6 +167,7 @@ io.on('connection', (socket) => {
     waitingQueue.push(userId);
     socket.emit('searching');
     console.log(`User ${userId} added to queue. Queue length: ${waitingQueue.length}`);
+    broadcastUserCount();
   });
 
   socket.on('join_room', (data) => {
@@ -184,7 +196,6 @@ io.on('connection', (socket) => {
 
   socket.on('skip', () => {
     if (!userId) return;
-
     const user = users.get(userId);
     if (!user) return;
 
@@ -193,12 +204,11 @@ io.on('connection', (socket) => {
       if (room) {
         const partnerId = room.user1Id === userId ? room.user2Id : room.user1Id;
         const partner = users.get(partnerId);
-        
+
         if (partner && partner.socket) {
-          partner.socket.emit('partner_skipped');
+          try { partner.socket.emit('partner_skipped'); } catch(e) {}
           partner.roomId = null;
         }
-        
         rooms.delete(user.roomId);
         user.roomId = null;
       }
@@ -207,87 +217,93 @@ io.on('connection', (socket) => {
     // Remove from queue
     const queueIndex = waitingQueue.indexOf(userId);
     if (queueIndex > -1) waitingQueue.splice(queueIndex, 1);
-    
+
     user.waitingSince = null;
     broadcastUserCount();
   });
 
   // WebRTC Signaling
   socket.on('offer', (data) => {
-    if (!userId || !data.roomId) return;
-    
+    if (!userId || !data.roomId || !data.offer) return;
+
     const room = rooms.get(data.roomId);
     if (!room) return;
-    
+
     const partnerId = room.user1Id === userId ? room.user2Id : room.user1Id;
     const partner = users.get(partnerId);
-    
+
     if (partner && partner.socket) {
-      partner.socket.emit('offer', {
-        offer: data.offer,
-        from: userId
-      });
+      try {
+        partner.socket.emit('offer', {
+          offer: data.offer,
+          from: userId
+        });
+      } catch (e) { /* ignore */ }
     }
   });
 
   socket.on('answer', (data) => {
-    if (!userId || !data.roomId) return;
-    
+    if (!userId || !data.roomId || !data.answer) return;
+
     const room = rooms.get(data.roomId);
     if (!room) return;
-    
+
     const partnerId = room.user1Id === userId ? room.user2Id : room.user1Id;
     const partner = users.get(partnerId);
-    
+
     if (partner && partner.socket) {
-      partner.socket.emit('answer', {
-        answer: data.answer,
-        from: userId
-      });
+      try {
+        partner.socket.emit('answer', {
+          answer: data.answer,
+          from: userId
+        });
+      } catch (e) { /* ignore */ }
     }
   });
 
   socket.on('ice_candidate', (data) => {
-    if (!userId || !data.roomId) return;
-    
+    if (!userId || !data.roomId || !data.candidate) return;
+
     const room = rooms.get(data.roomId);
     if (!room) return;
-    
+
     const partnerId = room.user1Id === userId ? room.user2Id : room.user1Id;
     const partner = users.get(partnerId);
-    
+
     if (partner && partner.socket) {
-      partner.socket.emit('ice_candidate', {
-        candidate: data.candidate,
-        from: userId
-      });
+      try {
+        partner.socket.emit('ice_candidate', {
+          candidate: data.candidate,
+          from: userId
+        });
+      } catch (e) { /* ignore */ }
     }
   });
 
   // Chat messages
   socket.on('chat_message', (data) => {
     if (!userId || !data.roomId || !data.message) return;
-    
+
     const room = rooms.get(data.roomId);
     if (!room) return;
-    
+
     const partnerId = room.user1Id === userId ? room.user2Id : room.user1Id;
     const partner = users.get(partnerId);
-    
+
     if (partner && partner.socket) {
-      partner.socket.emit('chat_message', {
-        message: data.message.trim().substring(0, 500), // Limit message length
-        from: userId,
-        timestamp: Date.now()
-      });
+      try {
+        partner.socket.emit('chat_message', {
+          message: data.message.trim().substring(0, 500),
+          from: userId,
+          timestamp: Date.now()
+        });
+      } catch (e) { /* ignore */ }
     }
   });
 
   socket.on('disconnect', () => {
     console.log('User disconnected:', socket.id);
-    if (userId) {
-      cleanupUser(userId);
-    }
+    if (userId) cleanupUser(userId);
   });
 });
 
@@ -295,7 +311,7 @@ io.on('connection', (socket) => {
 setInterval(() => {
   const now = Date.now();
   const maxAge = 30 * 60 * 1000; // 30 minutes
-  
+
   for (const [roomId, room] of rooms.entries()) {
     if (now - room.createdAt > maxAge) {
       rooms.delete(roomId);
